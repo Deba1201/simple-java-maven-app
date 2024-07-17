@@ -1,30 +1,78 @@
+#******* Jenkins pipeline to deploy sample java application in AWS EC2 *******
+
 pipeline {
     agent {
-        docker {
-            image 'maven:3.9.0'
-            args '-v /root/.m2:/root/.m2'
-        }
+        label: 'aws-cloud'
     }
-    stages {
-        stage('Build') {
+ environment {
+        AWS_ACCESS_KEY_ID = credentials('aws-access-key-id') // AWS credentials
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+        BB_CRED = credentials('git-cred')
+        SONAR_URL = "http://<IP>:9000" // Update the sonar server I
+        SONAR_TOKEN = credentials('sonar-token') 
+        SCANNER_PATH = "/opt/sonar-scanner/<scanner-version>" // Update the sonar scanner server version
+        SERVER_IP = "15.206.159.85"
+        SERVER_USER = "ubuntu"
+
+    }
+  stages {
+    stage('Initializing environment variables'){
+        cleanWs()
+        env.REPO_NAME = "https://github.com/Deba1201/simple-java-maven-app.git"
+        env.BRANCH = "master"
+    }
+    stage('Cloning code from GIT') {
             steps {
-                sh 'mvn -B -DskipTests clean package'
+                echo "GIT Clone"
+                git url: "${REPO_NAME}", branch: "${BRANCH}"
             }
         }
-        stage('Test') {
+    stage('Scan code using Sonarqube ') {
             steps {
-                sh 'mvn test'
+                echo "Sonar scan stage"
+                sh "mvn clean test"
+                sh 'echo "" >> sonar-project.properties'
+                sh "echo sonar.host.url=$SONAR_URL >> sonar-project.properties"
+                sh "echo sonar.projectName=SampleJavaApp >> sonar-project.properties"
+                sh "echo sonar.projectKey=MyApp >> sonar-project.properties"
+                sh "echo sonar.sources=$WORKSPACE >> sonar-project.properties"
+                sh "echo sonar.inclusions=src/**,pom.xml >> sonar-project.properties"
+                sh "echo sonar.java.binaries=target/classes >> sonar-project.properties"
+                sh "echo sonar.token=${SONAR_TOKEN} >> sonar-project.properties"
+                sh "$SCANNER_PATH/bin/sonar-scanner"
             }
-            post {
-                always {
-                    junit 'target/surefire-reports/*.xml'
+        }
+     stage('Code Build') {
+            steps {
+                echo "Build the code"
+                script {
+                    sh "mvn clean install"
                 }
             }
         }
-        stage('Deliver') {
-            steps {
-                sh './jenkins/scripts/deliver.sh'
+    stage('Deploy artifact to EC2') {
+            when {
+                expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
             }
+            steps {
+                script {
+
+                    sh "sshpass -e scp -o StrictHostKeyChecking=no -r /target/classes/app.jar ${SERVER_USER}@${SERVER_IP}:/app/"
+                    sh "sshpass -e ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'systemctl restart app.service' "
+
+        }
+            }
+        }
+    }
+  post {
+        always {
+                archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: true
+        }
+        success {
+            echo "Jenkins ${env.JOB_BASE_NAME} has been executed with ${currentBuild.currentResult} status"
+        }
+        failure {
+             echo "Jenkins ${env.JOB_BASE_NAME} has been executed with failed status"
         }
     }
 }
